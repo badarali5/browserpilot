@@ -1,0 +1,23 @@
+# BrowserPilot dashboard theme + runtime defaults.
+# Everything here is local and free: no external fonts, no telemetry, no keys.
+
+[theme]
+base = "dark"
+primaryColor = "#10b981"
+backgroundColor = "#0b1120"
+secondaryBackgroundColor = "#111827"
+textColor = "#e5e7eb"
+font = "sans serif"
+
+[server]
+headless = true
+port = 8501
+enableXsrfProtection = true
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = "full"
