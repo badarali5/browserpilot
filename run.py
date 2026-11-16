@@ -1,6 +1,6 @@
 """BrowserPilot - One command to rule them all.
 
-Run:    py run.py
+Run:    python run.py
 It will:
   1. Verify environment (Python, Chromium, DB)
   2. Start the FastAPI server
@@ -11,28 +11,26 @@ import webbrowser
 import subprocess
 import sys
 import os
+import time
 from pathlib import Path
+
 
 def check_environment():
     """Verify that required tools are available."""
     issues = []
-    
+
     # Check Python version
     if sys.version_info < (3, 10):
         issues.append("Python >= 3.10 required (found {})".format(sys.version_info))
-    
+
     # Check Chromium/Playwright
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        issues.append("playwright not installed - run: py -3 -m pip install playwright")
-    
-    # Check if DB directory exists
-    db_path = Path("data/browserpilot.db")
-    if not db_path.parent.exists():
-        issues.append(f"DB directory {db_path.parent} doesn't exist")
-    
+        issues.append("playwright not installed - run: python -m pip install playwright")
+
     return issues
+
 
 def main():
     issues = check_environment()
@@ -42,31 +40,31 @@ def main():
             print(f"  - {issue}")
         print("\nFix these issues before running.")
         return
-    
+
     # Open browser after a short delay
     def open_browser():
         webbrowser.open("http://127.0.0.1:8000")
-    
-    # Start the server
+
+    # Start the server using the script's own directory
+    script_dir = str(Path(__file__).parent)
     print("Starting BrowserPilot...")
     print("=" * 50)
     print("Opening browser in a moment...")
     print("=" * 50)
-    
-    # Start uvicorn in background
+
+    # Start uvicorn in background from the script's directory
     subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", "8000"],
-        cwd=r"D:\AIproject",
+        cwd=script_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    
-    # Schedule browser open
+
+    # Schedule browser open (wait for server to start)
     import threading
-    import time
     time.sleep(2)  # Wait for server to start
     open_browser()
-    
+
     # Keep the console alive
     print("\nBrowserPilot running at http://127.0.0.1:8000")
     print("Press Ctrl+C to stop")
@@ -75,6 +73,7 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nStopped.")
+
 
 if __name__ == "__main__":
     main()
