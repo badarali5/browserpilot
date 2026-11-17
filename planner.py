@@ -125,41 +125,6 @@ def validate_step(step: Dict[str, Any]) -> tuple[bool, str]:
         if field not in step or step[field] is None:
             return False, f"Action '{action}' requires '{field}'"
 
-    # Check for unexpected fields
-    allowed = set(required + optional)
-    for key in step:
-        if key not in allowed and key != "description":
-            # Allow extra descriptive fields
-            pass
-
-    return True, ""
-
-
-def validate_step(step: Dict[str, Any]) -> tuple[bool, str]:
-    """Validate a single test step dict.
-
-    Returns (is_valid, error_message).
-    """
-
-    if not isinstance(step, dict):
-        return False, "Step must be a dictionary"
-
-    action = step.get("action")
-    if not action:
-        return False, "Step missing 'action' key"
-
-    if action not in VALID_ACTIONS:
-        return False, f"Invalid action '{action}'. Valid: {', '.join(VALID_ACTIONS.keys())}"
-
-    action_schema = VALID_ACTIONS[action]
-    required = action_schema["required"]
-    optional = action_schema["optional"]
-
-    # Check required fields
-    for field in required:
-        if field not in step or step[field] is None:
-            return False, f"Action '{action}' requires '{field}'"
-
     # Check that 'expected' is only used with 'assert' action
     if action != "assert" and "expected" in step:
         return False, f"Action '{action}' does not use 'expected' field"
@@ -251,6 +216,7 @@ ACTION_PATTERNS = {
     
     # Navigate patterns
     r"(?:go to|navigate to|visit)\s+(?:the\s+)?(?:page|url|site)\s+(?:at|for)?\s+([\w.\-/]+)" : "navigate",
+    r"(?:go to|navigate to|visit)\s+(?:the\s+)?((?:/|https?://)[\w.\-/]+)" : "navigate",
     r"go to\s+(?:the\s+)?(?:login|register|profile|home)" : "navigate",
     
     # Assert patterns
@@ -306,7 +272,7 @@ def generate_plan(goal: str) -> Optional[Dict[str, Any]]:
     steps = []
 
     # Split by common conjunctions
-    sentence_endings = re.split(r"[.!?]+", goal_stripped)
+    sentence_endings = re.split(r"[.!?]+|\s+\band\b\s+", goal_stripped, flags=re.IGNORECASE)
     sentence_endings = [s.strip() for s in sentence_endings if s.strip()]
 
     for sentence in sentence_endings:
@@ -404,7 +370,7 @@ def execute_plan(plan: dict) -> dict:
 
         # Simulate navigation
         if action == "navigate":
-            url = value or "/"
+            url = step.get("url") or value or "/"
             result["status"] = "pass"
             result["evidence"] = f"Navigated to {url}; page title: {pages.get(url, {}).get('title', 'Unknown')}"
 

@@ -12,7 +12,7 @@ Run with: py demo_website.py
 """
 
 from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -21,6 +21,7 @@ import json
 import threading
 from pathlib import Path
 from datetime import datetime
+from planner import generate_plan
 
 app = FastAPI(title="BrowserPilot Demo", version="1.0.0")
 
@@ -76,7 +77,7 @@ def execute_test_plan(plan_json: str) -> dict:
     }
     
     registered = False
-    logged_in = False
+    current_url = "/"
     
     for i, step in enumerate(steps, 1):
         action = step.get("action")
@@ -88,7 +89,8 @@ def execute_test_plan(plan_json: str) -> dict:
         
         # Simulate navigation
         if action == "navigate":
-            url = value or "/"
+            url = step.get("url") or value or "/"
+            current_url = url
             result["status"] = "pass"
             result["evidence"] = f"Navigated to {url}"
             if url in pages:
@@ -112,7 +114,7 @@ def execute_test_plan(plan_json: str) -> dict:
             result["status"] = "pass"
             result["evidence"] = f"Verified '{expected}'"
             # Check for bugs after registration
-            if registered and "bio" in expected.lower() and url in pages.get("/profile", {}).get("bugs", []):
+            if registered and "bio" in expected.lower() and current_url == "/profile":
                 bugs_found.append("bio_unbounded")
         
         results.append(result)
@@ -288,7 +290,16 @@ async def run_test_post(request: Request):
     """POST endpoint for running tests."""
     form = await request.form()
     goal = form.get("goal", "")
-    return await get_api_run_test(request, goal)
+    plan = generate_plan(goal) if goal else None
+    if not plan:
+        return JSONResponse(
+            {"error": "Could not parse goal. Provide a clear natural language goal."},
+            status_code=400,
+        )
+    return JSONResponse({
+        "plan": plan,
+        "report": execute_test_plan(json.dumps(plan)),
+    })
 
 
 # ══════════════════════════════════════

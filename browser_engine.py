@@ -18,6 +18,7 @@ import asyncio
 import json
 import time
 import base64
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -69,7 +70,7 @@ async def execute_step(
 
     try:
         if action == "navigate":
-            url = value or "/"
+            url = step.get("url") or value or "/"
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
             result = make_result(
                 step_num=step.get("step", 1),
@@ -192,7 +193,7 @@ async def execute_step(
                         error=f"Expected text '{expected}' not found on page",
                     )
         elif action == "screenshot":
-            filepath = value or f"screenshot_step_{step_num}.png"
+            filepath = step.get("filepath") or value or f"screenshot_step_{step.get('step', 1)}.png"
             await page.screenshot(path=filepath)
             result = make_result(
                 step_num=step.get("step", 1),
@@ -271,10 +272,11 @@ async def execute_plan(
     }
 
     start_time = time.time()
+    Path("reports").mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context()
+        context = await browser.new_context(base_url="http://127.0.0.1:8000")
         page = await context.new_page()
 
         try:

@@ -178,25 +178,6 @@ async def demo_logout(request: Request):
     )
 
 
-@app.post("/api/run-test", include_in_schema=False)
-async def demo_run_test(request: Request):
-    """Run a test plan against the demo website."""
-    form = await request.form()
-    goal = form.get("goal", "")
-    plan = generate_plan(goal) if goal else None
-    if not plan:
-        return JSONResponse(
-            {"error": "Could not parse goal. Provide a clear natural language goal."},
-            status_code=400,
-        )
-    from planner import execute_plan
-    report = execute_plan(plan)
-    return JSONResponse({
-        "plan": plan,
-        "report": report,
-    })
-
-
 # ══════════════════════════════════════
 # Startup
 # ══════════════════════════════════════
