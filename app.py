@@ -28,6 +28,8 @@ from browser_engine import execute_plan as execute_browser_plan, validate_target
 from agent import BrowserTools
 from agent_loop import AutonomousAgent
 from llm_planner import LLMPlanner
+from benchmarks.benchmark_m4 import benchmark
+from algorithms.failure_ml import kmeans_cluster, load_persisted_failures
 
 # ══════════════════════════════════════
 # API Routes
@@ -179,6 +181,32 @@ async def run_agent_test(request: Request):
             {"error": f"Autonomous browser execution could not start: {exc}"},
             status_code=502,
         )
+
+
+@app.get("/api/m4/benchmark", include_in_schema=False)
+async def milestone4_benchmark():
+    """Expose the reproducible synthetic BFS/A*/GA benchmark."""
+    return JSONResponse(benchmark(seed=1729))
+
+
+@app.get("/api/m4/failures/analysis", include_in_schema=False)
+async def milestone4_failure_analysis():
+    """Analyze only failure records persisted in the Milestone 5 database."""
+    base_dir = Path(__file__).resolve().parent
+    database = base_dir / "data" / "browserpilot.db"
+    records = load_persisted_failures(database)
+    clustering = kmeans_cluster(records, k=min(3, len(records) or 1), seed=1729)
+    return JSONResponse({
+        "database": str(database),
+        "persisted_record_count": len(records),
+        "clustering": {
+            "seed": clustering["seed"],
+            "k": clustering["k"],
+            "clusters": clustering["clusters"],
+            "assignments": clustering["assignments"],
+        },
+        "classification": "No supervised evaluation: no persisted labeled failure records.",
+    })
 
 
 # ══════════════════════════════════════
