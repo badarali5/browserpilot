@@ -19,16 +19,42 @@ def load_persisted_failures(database: str | Path) -> list[dict[str, Any]]:
     connection = sqlite3.connect(str(database))
     connection.row_factory = sqlite3.Row
     try:
-        rows = connection.execute(
-            """
-            SELECT br.category, br.title, br.summary, br.root_cause,
-                   br.fingerprint, br.console_errors, br.evidence,
-                   s.action, s.error, s.url_before, s.url_after
-            FROM bug_reports br
-            LEFT JOIN steps s ON s.run_id = br.run_id
-            WHERE br.category IS NOT NULL OR s.ok = 0
-            """
-        ).fetchall()
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "bug_reports" in tables and "steps" in tables:
+            rows = connection.execute(
+                """
+                SELECT br.category, br.title, br.summary, br.root_cause,
+                       br.fingerprint, br.console_errors, br.evidence,
+                       s.action, s.error, s.url_before, s.url_after
+                FROM bug_reports br
+                LEFT JOIN steps s ON s.run_id = br.run_id
+                WHERE br.category IS NOT NULL OR s.ok = 0
+                """
+            ).fetchall()
+        elif "defects" in tables and "test_steps" in tables:
+            rows = connection.execute(
+                """
+                SELECT d.classification AS category,
+                       d.classification AS title,
+                       d.observed_evidence AS summary,
+                       d.inferred_cause AS root_cause,
+                       d.classification AS fingerprint,
+                       '' AS console_errors,
+                       d.observed_evidence AS evidence,
+                       s.action, s.error, '' AS url_before, '' AS url_after
+                FROM defects d
+                LEFT JOIN test_steps s
+                  ON s.run_id = d.run_id AND s.step_number = d.step_number
+                WHERE d.classification IS NOT NULL
+                """
+            ).fetchall()
+        else:
+            rows = []
         return [dict(row) for row in rows]
     finally:
         connection.close()

@@ -21,7 +21,7 @@ import json
 import threading
 from pathlib import Path
 from datetime import datetime
-from planner import generate_plan
+from planner.planner import generate_plan
 
 app = FastAPI(title="BrowserPilot Demo", version="1.0.0")
 
