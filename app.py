@@ -112,46 +112,31 @@ async def run_test(request: Request):
 @app.get("/", include_in_schema=False)
 async def landing(request: Request):
     """Landing page with professional design."""
-    return templates.TemplateResponse(
-        "landing.html",
-        {"request": request, "title": "BrowserPilot", "version": "1.0.0"},
-    )
+    return templates.TemplateResponse(request=request, name="landing.html", context={"title": "BrowserPilot", "version": "1.0.0"})
 
 
 @app.get("/app", include_in_schema=False)
 async def app_shell(request: Request):
     """Application shell page."""
-    return templates.TemplateResponse(
-        "app_shell.html",
-        {"request": request, "title": "BrowserPilot - App", "version": "1.0.0"},
-    )
+    return templates.TemplateResponse(request=request, name="app_shell.html", context={"title": "BrowserPilot - App", "version": "1.0.0"})
 
 
 @app.get("/about", include_in_schema=False)
 async def about(request: Request):
     """About page."""
-    return templates.TemplateResponse(
-        "about.html",
-        {"request": request, "title": "About BrowserPilot", "version": "1.0.0"},
-    )
+    return templates.TemplateResponse(request=request, name="about.html", context={"title": "About BrowserPilot", "version": "1.0.0"})
 
 
 @app.get("/features", include_in_schema=False)
 async def features(request: Request):
     """Features page."""
-    return templates.TemplateResponse(
-        "features.html",
-        {"request": request, "title": "Features", "version": "1.0.0"},
-    )
+    return templates.TemplateResponse(request=request, name="features.html", context={"title": "Features", "version": "1.0.0"})
 
 
 @app.get("/contact", include_in_schema=False)
 async def contact(request: Request):
     """Contact page."""
-    return templates.TemplateResponse(
-        "contact.html",
-        {"request": request, "title": "Contact", "version": "1.0.0"},
-    )
+    return templates.TemplateResponse(request=request, name="contact.html", context={"title": "Contact", "version": "1.0.0"})
 
 
 # ══════════════════════════════════════
@@ -161,105 +146,69 @@ async def contact(request: Request):
 @app.get("/demo", include_in_schema=False)
 async def demo_root(request: Request):
     """Demo website root."""
-    return templates.TemplateResponse(
-        "demo_index.html",
-        {"request": request, "title": "BrowserPilot Demo"},
-    )
+    return templates.TemplateResponse(request=request, name="demo_index.html", context={"title": "BrowserPilot Demo"})
 
 
 @app.get("/demo/register", include_in_schema=False)
 async def demo_register_get(request: Request):
     """Registration page."""
-    return templates.TemplateResponse(
-        "demo_register.html",
-        {"request": request, "title": "Register", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
 
 
 @app.post("/demo/register", include_in_schema=False)
 async def demo_register_post(request: Request):
     """Handle registration."""
-    return templates.TemplateResponse(
-        "demo_register.html",
-        {"request": request, "title": "Register", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
 
 
 @app.get("/demo/login", include_in_schema=False)
 async def demo_login_get(request: Request):
     """Login page."""
-    return templates.TemplateResponse(
-        "demo_login.html",
-        {"request": request, "title": "Login", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
 
 
 @app.post("/demo/login", include_in_schema=False)
 async def demo_login_post(request: Request):
     """Handle login."""
-    return templates.TemplateResponse(
-        "demo_login.html",
-        {"request": request, "title": "Login", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
 
 
 @app.get("/demo/profile", include_in_schema=False)
 async def demo_profile_get(request: Request):
     """Profile page."""
-    return templates.TemplateResponse(
-        "demo_profile.html",
-        {"request": request, "title": "Profile", "user": {}},
-    )
+    return templates.TemplateResponse(request=request, name="demo_profile.html", context={"title": "Profile", "user": {}})
 
 
 @app.get("/demo/logout", include_in_schema=False)
 async def demo_logout(request: Request):
     """Logout."""
-    return templates.TemplateResponse(
-        "demo_index.html",
-        {"request": request, "title": "BrowserPilot Demo"},
-    )
+    return templates.TemplateResponse(request=request, name="demo_index.html", context={"title": "BrowserPilot Demo"})
 
 
 # Short demo aliases keep the existing demo usable at the natural test URLs.
 @app.get("/register", include_in_schema=False)
 async def register_alias(request: Request):
-    return templates.TemplateResponse(
-        "demo_register.html",
-        {"request": request, "title": "Register", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
 
 
 @app.post("/register", include_in_schema=False)
 async def register_alias_post(request: Request):
-    return templates.TemplateResponse(
-        "demo_register.html",
-        {"request": request, "title": "Register", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
 
 
 @app.get("/login", include_in_schema=False)
 async def login_alias(request: Request):
-    return templates.TemplateResponse(
-        "demo_login.html",
-        {"request": request, "title": "Login", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
 
 
 @app.post("/login", include_in_schema=False)
 async def login_alias_post(request: Request):
-    return templates.TemplateResponse(
-        "demo_login.html",
-        {"request": request, "title": "Login", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
 
 
 @app.get("/profile", include_in_schema=False)
 async def profile_alias(request: Request):
-    return templates.TemplateResponse(
-        "demo_profile.html",
-        {"request": request, "title": "Profile", "user": {}},
-    )
+    return templates.TemplateResponse(request=request, name="demo_profile.html", context={"title": "Profile", "user": {}})
 
 
 # ══════════════════════════════════════
