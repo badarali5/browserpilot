@@ -40,9 +40,12 @@
     </style>
 </head>
 <body class="min-h-screen">
-    <!-- Skip link -->
-    <a href="#main-content" class="sr-only">Skip to main content</a>
-    
+    <script>
+        if (window.location.hash === '#main-content') {
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+    </script>
+
     <!-- Header -->
     <header class="bg-bg-secondary/80 border-b border-border-color/50 sticky top-0 z-50" 
             style="background: rgba(30, 41, 59, 0.8) !important;">
