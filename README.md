@@ -87,14 +87,6 @@ without `BROWSERPILOT_LLM_API_KEY` or `OPENAI_API_KEY`.
 
 This mode is optional and requires an OpenAI-compatible API:
 
-```powershell
-$env:BROWSERPILOT_LLM_API_KEY = "your-api-key"
-$env:BROWSERPILOT_LLM_MODEL = "gpt-4o-mini"
-$env:BROWSERPILOT_LLM_BASE_URL = "https://api.openai.com/v1"
-```
-
-`OPENAI_API_KEY` is also accepted. Restart the server after setting environment variables.
-
 `POST /api/run-agent-test` accepts `goal`, `target_url`, `timeout`, `max_actions`,
 `max_duration`, and `artifact_dir`.
 
