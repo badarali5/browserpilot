@@ -1,8 +1,4 @@
-"""BrowserPilot - Professional AI Browser Automation Platform.
 
-A complete, professional web application with multiple pages,
-beautiful design, and 100% free (no API keys, no login wall).
-"""
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -26,8 +22,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 templates = Jinja2Templates(directory="templates")
 
-# Import and include the test planner module
-from planner import generate_plan, execute_plan
+# Import planner generation/validation and the real Playwright executor
+from planner import generate_plan_with_error, validate_plan
+from browser_engine import execute_plan as execute_browser_plan, validate_target_url
 
 # ══════════════════════════════════════
 # API Routes
@@ -41,20 +38,66 @@ async def api_health():
 
 @app.post("/api/run-test", include_in_schema=False)
 async def run_test(request: Request):
-    """Run a test plan against the demo website."""
-    form = await request.form()
-    goal = form.get("goal", "")
+    """Generate, validate, and execute a plan in a real browser."""
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+    else:
+        form = await request.form()
+        payload = dict(form)
 
-    plan = generate_plan(goal) if goal else None
+    goal = str(payload.get("goal", "")).strip()
+    if not goal:
+        return JSONResponse({"error": "Provide a non-empty testing goal."}, status_code=400)
 
+    target_url = str(payload.get("target_url") or os.getenv("BROWSERPILOT_TARGET_URL", "http://127.0.0.1:8000")).strip()
+    try:
+        target_url = validate_target_url(target_url)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    try:
+        timeout = int(payload.get("timeout", 30))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "Browser timeout must be an integer."}, status_code=400)
+    if timeout <= 0 or timeout > 300:
+        return JSONResponse({"error": "Browser timeout must be between 1 and 300 seconds."}, status_code=400)
+
+    artifact_name = str(payload.get("artifact_dir", "artifacts")).strip().replace("\\", "/")
+    base_dir = Path(__file__).resolve().parent
+    artifact_root = (base_dir / "artifacts").resolve()
+    requested_dir = (base_dir / artifact_name).resolve()
+    if (
+        not artifact_name
+        or Path(artifact_name).is_absolute()
+        or ".." in Path(artifact_name).parts
+        or (requested_dir != artifact_root and artifact_root not in requested_dir.parents)
+    ):
+        return JSONResponse({"error": "artifact_dir must be a subdirectory of the artifacts directory."}, status_code=400)
+    requested_dir.mkdir(parents=True, exist_ok=True)
+
+    plan, planning_error = generate_plan_with_error(goal)
     if not plan:
-        return JSONResponse(
-            {"error": "Could not parse goal. Provide a clear natural language goal."},
-            status_code=400,
-        )
+        return JSONResponse({"error": planning_error}, status_code=400)
 
-    # Execute the plan
-    report = execute_plan(plan)
+    is_valid, validation_error, bugs_detected = validate_plan(plan)
+    if not is_valid:
+        return JSONResponse({"error": f"Invalid plan: {validation_error}"}, status_code=400)
+    plan["bugs_detected"] = bugs_detected
+
+    try:
+        report = await execute_browser_plan(
+            plan,
+            headless=True,
+            timeout=timeout,
+            target_url=target_url,
+            screenshot_dir=str(requested_dir),
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"Browser execution could not start: {exc}", "plan": plan},
+            status_code=502,
+        )
 
     return JSONResponse({
         "plan": plan,
@@ -175,6 +218,47 @@ async def demo_logout(request: Request):
     return templates.TemplateResponse(
         "demo_index.html",
         {"request": request, "title": "BrowserPilot Demo"},
+    )
+
+
+# Short demo aliases keep the existing demo usable at the natural test URLs.
+@app.get("/register", include_in_schema=False)
+async def register_alias(request: Request):
+    return templates.TemplateResponse(
+        "demo_register.html",
+        {"request": request, "title": "Register", "error": None},
+    )
+
+
+@app.post("/register", include_in_schema=False)
+async def register_alias_post(request: Request):
+    return templates.TemplateResponse(
+        "demo_register.html",
+        {"request": request, "title": "Register", "error": None},
+    )
+
+
+@app.get("/login", include_in_schema=False)
+async def login_alias(request: Request):
+    return templates.TemplateResponse(
+        "demo_login.html",
+        {"request": request, "title": "Login", "error": None},
+    )
+
+
+@app.post("/login", include_in_schema=False)
+async def login_alias_post(request: Request):
+    return templates.TemplateResponse(
+        "demo_login.html",
+        {"request": request, "title": "Login", "error": None},
+    )
+
+
+@app.get("/profile", include_in_schema=False)
+async def profile_alias(request: Request):
+    return templates.TemplateResponse(
+        "demo_profile.html",
+        {"request": request, "title": "Profile", "user": {}},
     )
 
 

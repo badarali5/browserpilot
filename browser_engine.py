@@ -18,6 +18,10 @@ import asyncio
 import json
 import time
 import base64
+import ipaddress
+import os
+import socket
+from urllib.parse import urljoin, urlparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,6 +33,78 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 # ══════════════════════════════════════
 
 ExecutionResult = Dict[str, Any]
+
+
+def validate_target_url(target_url: str, allowed_origins: Optional[List[str]] = None) -> str:
+    """Validate a target origin against the configured local demo allowlist."""
+    if not isinstance(target_url, str) or not target_url.strip():
+        raise ValueError("A target URL is required.")
+
+    parsed = urlparse(target_url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Target URL must use http or https.")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Target URL must not contain credentials, query parameters, or fragments.")
+    if not parsed.hostname:
+        raise ValueError("Target URL must include a hostname.")
+
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    configured = allowed_origins
+    if configured is None:
+        raw_allowed = os.getenv(
+            "BROWSERPILOT_ALLOWED_ORIGINS",
+            "http://127.0.0.1:8000,http://localhost:8000",
+        )
+        configured = [item.strip().rstrip("/") for item in raw_allowed.split(",") if item.strip()]
+
+    if origin not in configured:
+        raise ValueError(
+            "Target URL is not in the configured allowlist. "
+            "Set BROWSERPILOT_ALLOWED_ORIGINS for authorized origins."
+        )
+
+    hostname = parsed.hostname
+    try:
+        ip_addresses = [ipaddress.ip_address(hostname)]
+    except ValueError:
+        try:
+            ip_addresses = [
+                ipaddress.ip_address(address[4][0])
+                for address in socket.getaddrinfo(hostname, None)
+            ]
+        except socket.gaierror as exc:
+            raise ValueError("Target hostname could not be resolved.") from exc
+
+    is_loopback_origin = (
+        hostname in {"127.0.0.1", "localhost"}
+        and origin in configured
+    )
+    for address in ip_addresses:
+        if not is_loopback_origin and (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+        ):
+            raise ValueError("Internal and non-public target addresses are not allowed.")
+    return origin
+
+
+def resolve_navigation_url(target_url: str, url: Optional[str]) -> str:
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("Navigate action requires a non-empty URL.")
+
+    target_origin = urlparse(target_url)
+    resolved = urljoin(target_url.rstrip("/") + "/", url.strip())
+    resolved_origin = urlparse(resolved)
+    if (
+        resolved_origin.scheme not in {"http", "https"}
+        or resolved_origin.scheme != target_origin.scheme
+        or resolved_origin.netloc != target_origin.netloc
+    ):
+        raise ValueError("Navigation URL must stay on the configured target origin.")
+    return resolved
 
 
 def make_result(step_num: int, action: str, status: str, evidence: str = "", error: str = "") -> ExecutionResult:
@@ -117,10 +193,9 @@ async def execute_step(
                     evidence="Click step missing selector",
                     error="Missing selector",
                 )
-
-            element = await page.wait_for_selector(selector, timeout=timeout * 1000)
-            if element:
-                await element.click()
+            if selector.startswith("text="):
+                element = page.get_by_text(selector[5:], exact=False)
+                await element.first.click(timeout=timeout * 1000)
                 result = make_result(
                     step_num=step.get("step", 1),
                     action="click",
@@ -128,13 +203,23 @@ async def execute_step(
                     evidence=f"Clicked element: {selector}",
                 )
             else:
-                return make_result(
-                    step_num=step.get("step", 1),
-                    action="click",
-                    status="fail",
-                    evidence=f"Element not found: {selector}",
-                    error=f"Selector '{selector}' not found",
-                )
+                element = await page.wait_for_selector(selector, timeout=timeout * 1000)
+                if element:
+                    await element.click()
+                    result = make_result(
+                        step_num=step.get("step", 1),
+                        action="click",
+                        status="pass",
+                        evidence=f"Clicked element: {selector}",
+                    )
+                else:
+                    return make_result(
+                        step_num=step.get("step", 1),
+                        action="click",
+                        status="fail",
+                        evidence=f"Element not found: {selector}",
+                        error=f"Selector '{selector}' not found",
+                    )
 
         elif action == "assert":
             if not expected:
@@ -149,7 +234,8 @@ async def execute_step(
             # Get actual page content for verification
             try:
                 body_text = await page.inner_text("body")
-                found = expected.lower() in body_text.lower()
+                title = await page.title()
+                found = expected.lower() in body_text.lower() or expected.lower() in title.lower()
             except Exception:
                 found = False
 
@@ -194,6 +280,9 @@ async def execute_step(
                     )
         elif action == "screenshot":
             filepath = step.get("filepath") or value or f"screenshot_step_{step.get('step', 1)}.png"
+            screenshot_root = step.get("_artifact_dir")
+            if screenshot_root:
+                filepath = str(Path(screenshot_root) / Path(filepath).name)
             await page.screenshot(path=filepath)
             result = make_result(
                 step_num=step.get("step", 1),
@@ -239,6 +328,8 @@ async def execute_plan(
     plan: Dict[str, Any],
     headless: bool = True,
     timeout: int = 30,
+    target_url: str = "http://127.0.0.1:8000",
+    screenshot_dir: str = "reports",
 ) -> Dict[str, Any]:
     """Execute a complete test plan using Playwright.
 
@@ -250,6 +341,7 @@ async def execute_plan(
     Returns:
         Execution report dict with results, summary, and evidence
     """
+    target_url = validate_target_url(target_url)
     plan_id = plan.get("plan_id", f"plan_{int(time.time())}")
     steps = plan.get("steps", [])
     goal = plan.get("goal", "")
@@ -272,17 +364,24 @@ async def execute_plan(
     }
 
     start_time = time.time()
-    Path("reports").mkdir(parents=True, exist_ok=True)
+    artifact_dir = Path(screenshot_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    target_origin = f"{urlparse(target_url).scheme}://{urlparse(target_url).netloc}"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(base_url="http://127.0.0.1:8000")
+        context = await browser.new_context(base_url=target_url)
         page = await context.new_page()
 
         try:
             for i, step in enumerate(steps, 1):
                 # Mark step number in the step dict
                 step_with_num = {**step, "step": i}
+                if step_with_num.get("action") == "navigate":
+                    url = step_with_num.get("url")
+                    step_with_num["url"] = resolve_navigation_url(target_url, url)
+                elif step_with_num.get("action") == "screenshot":
+                    step_with_num["_artifact_dir"] = str(artifact_dir)
 
                 # Execute the step
                 result = await execute_step(page, step_with_num, timeout=timeout)
@@ -302,7 +401,7 @@ async def execute_plan(
 
                 # Capture screenshot after each step (optional)
                 try:
-                    ss_path = f"reports/ss_{plan_id}_step_{i}.png"
+                    ss_path = str(artifact_dir / f"ss_{plan_id}_step_{i}.png")
                     await page.screenshot(path=ss_path)
                     report["screenshots"].append(ss_path)
                 except Exception:

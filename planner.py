@@ -124,6 +124,36 @@ def validate_step(step: Dict[str, Any]) -> tuple[bool, str]:
     for field in required:
         if field not in step or step[field] is None:
             return False, f"Action '{action}' requires '{field}'"
+        if isinstance(step[field], str) and not step[field].strip():
+            return False, f"Action '{action}' requires non-empty '{field}'"
+
+    if action == "input":
+        selector = step.get("selector")
+        if not isinstance(selector, str) or not selector.strip():
+            return False, "Action 'input' requires a valid non-empty 'selector'"
+        value = step.get("value")
+        if not isinstance(value, str) or not value:
+            return False, "Action 'input' requires a non-empty string 'value'"
+
+    if action == "click":
+        selector = step.get("selector")
+        if not isinstance(selector, str) or not selector.strip():
+            return False, "Action 'click' requires a valid non-empty 'selector'"
+
+    if action == "navigate":
+        url = step.get("url")
+        if not isinstance(url, str) or not url.strip():
+            return False, "Action 'navigate' requires a non-empty 'url'"
+
+    if action == "assert":
+        expected = step.get("expected")
+        if not isinstance(expected, str) or not expected.strip():
+            return False, "Action 'assert' requires non-empty 'expected'"
+
+    if "timeout" in step:
+        timeout = step["timeout"]
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            return False, "Step 'timeout' must be a positive number"
 
     # Check that 'expected' is only used with 'assert' action
     if action != "assert" and "expected" in step:
@@ -254,88 +284,114 @@ def _nl_to_action(pattern_match: re.Match, action_type: str) -> Optional[Dict[st
 
 
 def generate_plan(goal: str) -> Optional[Dict[str, Any]]:
-    """Convert a natural-language goal into a validated test plan.
+    """Convert a supported natural-language goal into a validated plan."""
+    plan, _ = generate_plan_with_error(goal)
+    return plan
 
-    Args:
-        goal: Natural-language testing goal (e.g., "Test user registration with valid data")
 
-    Returns:
-        A validated plan dict, or None if the goal cannot be parsed.
-    """
+class PlanningError(ValueError):
+    pass
 
-    if not goal or not goal.strip():
-        return None
+
+def generate_plan_with_error(goal: str) -> tuple[Optional[Dict[str, Any]], str]:
+    if not isinstance(goal, str) or not goal.strip():
+        return None, "Provide a non-empty testing goal."
 
     goal_stripped = goal.strip()
+    clauses = [
+        part.strip()
+        for part in re.split(r"\s+\band\b\s+", goal_stripped, flags=re.IGNORECASE)
+        if part.strip()
+    ]
+    steps: List[Dict[str, Any]] = []
 
-    # Try pattern-based parsing first
-    steps = []
+    for clause in clauses:
+        lower = clause.lower()
 
-    # Split by common conjunctions
-    sentence_endings = re.split(r"[.!?]+|\s+\band\b\s+", goal_stripped, flags=re.IGNORECASE)
-    sentence_endings = [s.strip() for s in sentence_endings if s.strip()]
+        navigate_match = re.search(
+            r"(?:go to|navigate to|visit)\s+(?:the\s+)?((?:https?://|/)[^\s]+|(?:login|register|profile|home)(?:\s+page)?)",
+            clause,
+            re.IGNORECASE,
+        )
+        if navigate_match:
+            url = navigate_match.group(1).strip()
+            if not url.startswith(("http://", "https://", "/")):
+                url = f"/{url.split()[0]}"
+            steps.append({"action": "navigate", "url": url})
+            continue
 
-    for sentence in sentence_endings:
-        step_added = False
+        assert_match = re.search(
+            r"(?:verify|check|ensure|confirm)\s+(?:that\s+)?(.+?)(?:\s+(?:is\s+)?(?:present|visible|shown|correct|displayed))?\s*$",
+            clause,
+            re.IGNORECASE,
+        )
+        if assert_match:
+            expected = assert_match.group(1).strip()
+            if expected.lower().startswith("that "):
+                expected = expected[5:].strip()
+            if expected:
+                steps.append({"action": "assert", "expected": expected})
+                continue
 
-        # Try each pattern
-        for pattern, action_type in ACTION_PATTERNS.items():
-            match = re.search(pattern, sentence, re.IGNORECASE)
-            if match:
-                step = _nl_to_action(match, action_type)
-                if step:
-                    # Add reasonable defaults
-                    if step["action"] == "input" and not step.get("value"):
-                        step["value"] = "test@example.com"
-                    if step["action"] == "click" and not step.get("selector"):
-                        step["selector"] = "button"
-                    steps.append(step)
-                    step_added = True
-                    break
+        input_match = re.search(
+            r"(?:enter|input|type)\s+(?:the\s+)?(.+?)\s+(?:in|into)\s+(?:the\s+)?([a-z_-]+)(?:\s+(?:field|box|input))?",
+            clause,
+            re.IGNORECASE,
+        )
+        if input_match:
+            value = input_match.group(1).strip()
+            field_hint = (input_match.group(2) or "").lower()
+            if not field_hint:
+                field_match = re.search(r"\b(username|email|password|display_name|bio)\b", lower)
+                field_hint = field_match.group(1) if field_match else ""
+            selectors = {
+                "username": "input[name='username']",
+                "email": "input[name='email']",
+                "password": "input[name='password']",
+                "display_name": "input[name='display_name']",
+                "bio": "textarea[name='bio']",
+            }
+            if field_hint in selectors:
+                steps.append({"action": "input", "selector": selectors[field_hint], "value": value})
+                continue
+            return None, f"Unsupported input field in instruction: '{clause}'. Supported fields: username, email, password, display_name, bio."
 
-        # If no pattern matched, create a generic assert step
-        if not step_added:
-            steps.append({"action": "assert", "expected": sentence})
+        click_match = re.search(r"(?:click|select|press|submit)\s+(?:the\s+)?(.+)", clause, re.IGNORECASE)
+        if click_match:
+            target = click_match.group(1).lower()
+            if "submit" in target or "register" in target or "login" in target or "sign in" in target:
+                steps.append({"action": "click", "selector": "button[type='submit']"})
+            else:
+                words = re.sub(r"\s+(?:button|link|checkbox|radio)$", "", target).strip()
+                if words:
+                    steps.append({"action": "click", "selector": f"text={words}"})
+                else:
+                    return None, f"Unsupported click instruction: '{clause}'."
+            continue
 
-    # If we have very few steps from parsing, create a basic structure
-    if len(steps) < 2:
-        # Create a simple registration-like plan as fallback
-        steps = [
-            {"action": "navigate", "url": "/register"},
-            {"action": "input", "value": "valid_user", "selector": "input[name='username']"},
-            {"action": "input", "value": "valid@example.com", "selector": "input[name='email']"},
-            {"action": "input", "value": "Password123", "selector": "input[name='password']"},
-            {"action": "click", "selector": "button[type='submit']"},
-            {"action": "assert", "expected": "success"},
-        ]
+        if re.search(r"(?:take|capture)\s+(?:a\s+)?(?:screenshot|image)", clause, re.IGNORECASE):
+            steps.append({"action": "screenshot"})
+            continue
 
-    plan = {
-        "steps": steps,
-        "goal": goal_stripped,
-        "verified": False,
-        "bugs_detected": [],
-    }
+        if re.search(r"\b(register|registration)\b", lower) and re.search(r"\b(valid|correct)\b", lower):
+            steps.extend([
+                {"action": "navigate", "url": "/register"},
+                {"action": "input", "selector": "input[name='username']", "value": "valid_user"},
+                {"action": "input", "selector": "input[name='email']", "value": "valid@example.com"},
+                {"action": "input", "selector": "input[name='password']", "value": "Password123"},
+                {"action": "click", "selector": "button[type='submit']"},
+                {"action": "assert", "expected": "Login"},
+            ])
+            continue
 
-    # Validate the generated plan
-    is_valid, error, bug_descriptions = validate_plan(plan)
+        return None, f"Unsupported instruction: '{clause}'. Supported instructions are navigate, input, click, verify/assert text, and screenshot."
 
+    plan = {"steps": steps, "goal": goal_stripped, "verified": False, "bugs_detected": []}
+    is_valid, error, bugs = validate_plan(plan)
     if not is_valid:
-        # Fallback: return a minimal valid plan
-        plan = {
-            "steps": [
-                {"action": "navigate", "url": "/"},
-                {"action": "assert", "expected": "page loads"},
-            ],
-            "goal": goal_stripped,
-            "verified": False,
-            "bugs_detected": bug_descriptions,
-        }
-        return plan
-
-    # Mark bugs that were detected
-    plan["bugs_detected"] = bug_descriptions
-
-    return plan
+        return None, f"Generated plan validation failed: {error}"
+    plan["bugs_detected"] = bugs
+    return plan, ""
 
 
 # ══════════════════════════════════════
