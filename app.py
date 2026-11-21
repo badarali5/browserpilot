@@ -25,6 +25,9 @@ templates = Jinja2Templates(directory="templates")
 # Import planner generation/validation and the real Playwright executor
 from planner import generate_plan_with_error, validate_plan
 from browser_engine import execute_plan as execute_browser_plan, validate_target_url
+from agent import BrowserTools
+from agent_loop import AutonomousAgent
+from llm_planner import LLMPlanner
 
 # ══════════════════════════════════════
 # API Routes
@@ -103,6 +106,79 @@ async def run_test(request: Request):
         "plan": plan,
         "report": report,
     })
+
+
+@app.post("/api/run-agent-test", include_in_schema=False)
+async def run_agent_test(request: Request):
+    """Run an observation-driven, LLM-selected browser test."""
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+    else:
+        form = await request.form()
+        payload = dict(form)
+
+    goal = str(payload.get("goal", "")).strip()
+    if not goal:
+        return JSONResponse({"error": "Provide a non-empty testing goal."}, status_code=400)
+
+    target_url = str(payload.get("target_url") or os.getenv("BROWSERPILOT_TARGET_URL", "http://127.0.0.1:8000")).strip()
+    try:
+        target_url = validate_target_url(target_url)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    try:
+        max_actions = int(payload.get("max_actions", 12))
+        max_duration = float(payload.get("max_duration", 120))
+        timeout = int(payload.get("timeout", 10))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "max_actions, max_duration, and timeout must be numeric."}, status_code=400)
+    if max_actions <= 0 or max_actions > 50:
+        return JSONResponse({"error": "max_actions must be between 1 and 50."}, status_code=400)
+    if max_duration <= 0 or max_duration > 600:
+        return JSONResponse({"error": "max_duration must be between 1 and 600 seconds."}, status_code=400)
+    if timeout <= 0 or timeout > 300:
+        return JSONResponse({"error": "timeout must be between 1 and 300 seconds."}, status_code=400)
+
+    artifact_name = str(payload.get("artifact_dir", "artifacts")).strip().replace("\\", "/")
+    base_dir = Path(__file__).resolve().parent
+    artifact_root = (base_dir / "artifacts").resolve()
+    requested_dir = (base_dir / artifact_name).resolve()
+    if (
+        not artifact_name
+        or Path(artifact_name).is_absolute()
+        or ".." in Path(artifact_name).parts
+        or (requested_dir != artifact_root and artifact_root not in requested_dir.parents)
+    ):
+        return JSONResponse({"error": "artifact_dir must be a subdirectory of the artifacts directory."}, status_code=400)
+    requested_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            context = await browser.new_context(base_url=target_url)
+            page = await context.new_page()
+            try:
+                tools = BrowserTools(page, target_url, str(requested_dir))
+                agent = AutonomousAgent(
+                    LLMPlanner(timeout=timeout),
+                    tools,
+                    max_actions=max_actions,
+                    max_duration=max_duration,
+                )
+                report = await agent.run(goal)
+            finally:
+                await context.close()
+                await browser.close()
+        return JSONResponse(report)
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"Autonomous browser execution could not start: {exc}"},
+            status_code=502,
+        )
 
 
 # ══════════════════════════════════════
