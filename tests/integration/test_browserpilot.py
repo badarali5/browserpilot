@@ -79,10 +79,10 @@ def browser_server():
             "--log-level",
             "warning",
         ],
-        cwd=os.path.dirname(os.path.dirname(__file__)),
+        cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
     for _ in range(50):

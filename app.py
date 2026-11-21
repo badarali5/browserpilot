@@ -23,8 +23,105 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 # Import planner generation/validation and the real Playwright executor
-from planner import generate_plan_with_error, validate_plan
-from browser_engine import execute_plan as execute_browser_plan, validate_target_url
+from planner.planner import generate_plan_with_error, validate_plan
+from browser.browser_engine import execute_plan as execute_browser_plan, validate_target_url
+from browser.actions import BrowserTools
+from browser.session import AutonomousAgent
+from planner.llm_planner import LLMPlanner
+from benchmarks.benchmark_m4 import benchmark
+from algorithms.failure_ml import kmeans_cluster, load_persisted_failures
+
+from database.repository import ReportRepository
+from reporting.evidence import EvidenceCollector
+from config import BASE_DIR as CONFIG_BASE_DIR, DATABASE_PATH
+
+BASE_DIR = CONFIG_BASE_DIR
+REPORT_REPOSITORY = ReportRepository(DATABASE_PATH)
+
+
+def persist_execution_report(
+    *,
+    goal: str,
+    target_url: str,
+    report: dict,
+    plan: dict | None = None,
+    browser_config: dict | None = None,
+    planner_config: dict | None = None,
+    algorithm_config: dict | None = None,
+    artifact_dir: str | Path = "artifacts",
+    user_id: str | None = None,
+) -> str:
+    """Persist a real executor report and its evidence without changing its public shape."""
+    from datetime import datetime, timezone
+
+    summary = report.get("summary") or {}
+    started = datetime.now(timezone.utc)
+    status = "running"
+    if summary:
+        status = "passed" if summary.get("failed", 0) == 0 and summary.get("errors", 0) == 0 and summary.get("timeouts", 0) == 0 else "failed"
+    else:
+        status = str(report.get("status", "unknown"))
+
+    run_id = REPORT_REPOSITORY.create_run(
+        goal=goal,
+        target_url=target_url,
+        status=status,
+        user_id=user_id,
+        browser_config=browser_config or {"headless": True},
+        planner_config=planner_config or {"source": "existing planner"},
+        algorithm_config=algorithm_config or {"name": "browser execution"},
+    )
+    collector = EvidenceCollector(REPORT_REPOSITORY, run_id, artifact_dir)
+
+    plan_steps = (plan or {}).get("steps", []) if plan else []
+    for index, step_result in enumerate(report.get("steps", []), 1):
+        arguments = plan_steps[index - 1] if index - 1 < len(plan_steps) else {}
+        step_number = REPORT_REPOSITORY.store_step(
+            run_id,
+            step_result,
+            step_number=step_result.get("step", index),
+            action_arguments=arguments,
+        )
+        if step_result.get("status") in {"fail", "timeout", "error"}:
+            REPORT_REPOSITORY.store_defect(
+                run_id,
+                step_number=step_number,
+                classification=REPORT_REPOSITORY.get_run(run_id).steps[index - 1].error_classification,
+                observed_evidence=step_result.get("evidence") or step_result.get("error") or "",
+                inferred_cause="",
+                confidence="uncertain",
+            )
+
+    screenshots = report.get("screenshots", [])
+    collector.collect_screenshots(screenshots)
+    trace_path = report.get("trace_path")
+    if trace_path:
+        collector.collect_artifact(trace_path, "trace", mime_type="application/zip")
+    evidence_payload = {
+        "console_errors": report.get("console_errors", []),
+        "failed_network_requests": report.get("failed_network_requests", []),
+        "http_responses": report.get("http_responses", []),
+        "current_url": report.get("current_url"),
+    }
+    import json as _json
+    evidence_path = Path(artifact_dir) / f"evidence_{run_id}.json"
+    evidence_path.write_text(_json.dumps(evidence_payload, indent=2), encoding="utf-8")
+    collector.collect_artifact(evidence_path, "browser_evidence", mime_type="application/json")
+    evidence_errors = list(dict.fromkeys([*report.get("evidence_errors", []), *collector.errors]))
+    REPORT_REPOSITORY.update_run(
+        run_id,
+        status=status,
+        summary=summary or report,
+        evidence_errors=evidence_errors,
+    )
+    return run_id
+
+
+from api.reports import add_report_routes
+from api.history import add_history_routes
+
+add_report_routes(app, REPORT_REPOSITORY)
+add_history_routes(app, REPORT_REPOSITORY, templates)
 
 # ══════════════════════════════════════
 # API Routes
@@ -94,14 +191,171 @@ async def run_test(request: Request):
             screenshot_dir=str(requested_dir),
         )
     except Exception as exc:
+        try:
+            failed_run_id = persist_execution_report(
+                goal=goal,
+                target_url=target_url,
+                report={"status": "failed", "steps": [], "summary": {"errors": 1}, "evidence_errors": [str(exc)]},
+                plan=plan,
+                browser_config={"headless": True, "timeout_seconds": timeout},
+                artifact_dir=requested_dir,
+                user_id=payload.get("user_id"),
+            )
+        except Exception:
+            failed_run_id = None
         return JSONResponse(
-            {"error": f"Browser execution could not start: {exc}", "plan": plan},
+            {"error": f"Browser execution could not start: {exc}", "plan": plan, "run_id": failed_run_id},
             status_code=502,
         )
 
+    run_id = persist_execution_report(
+        goal=goal,
+        target_url=target_url,
+        report=report,
+        plan=plan,
+        browser_config={"headless": True, "timeout_seconds": timeout},
+        artifact_dir=requested_dir,
+        user_id=payload.get("user_id"),
+    )
     return JSONResponse({
         "plan": plan,
         "report": report,
+        "run_id": run_id,
+    })
+
+
+@app.post("/api/run-agent-test", include_in_schema=False)
+async def run_agent_test(request: Request):
+    """Run an observation-driven, LLM-selected browser test."""
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+    else:
+        form = await request.form()
+        payload = dict(form)
+
+    goal = str(payload.get("goal", "")).strip()
+    if not goal:
+        return JSONResponse({"error": "Provide a non-empty testing goal."}, status_code=400)
+
+    target_url = str(payload.get("target_url") or os.getenv("BROWSERPILOT_TARGET_URL", "http://127.0.0.1:8000")).strip()
+    try:
+        target_url = validate_target_url(target_url)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    try:
+        max_actions = int(payload.get("max_actions", 12))
+        max_duration = float(payload.get("max_duration", 120))
+        timeout = int(payload.get("timeout", 10))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "max_actions, max_duration, and timeout must be numeric."}, status_code=400)
+    if max_actions <= 0 or max_actions > 50:
+        return JSONResponse({"error": "max_actions must be between 1 and 50."}, status_code=400)
+    if max_duration <= 0 or max_duration > 600:
+        return JSONResponse({"error": "max_duration must be between 1 and 600 seconds."}, status_code=400)
+    if timeout <= 0 or timeout > 300:
+        return JSONResponse({"error": "timeout must be between 1 and 300 seconds."}, status_code=400)
+
+    artifact_name = str(payload.get("artifact_dir", "artifacts")).strip().replace("\\", "/")
+    base_dir = Path(__file__).resolve().parent
+    artifact_root = (base_dir / "artifacts").resolve()
+    requested_dir = (base_dir / artifact_name).resolve()
+    if (
+        not artifact_name
+        or Path(artifact_name).is_absolute()
+        or ".." in Path(artifact_name).parts
+        or (requested_dir != artifact_root and artifact_root not in requested_dir.parents)
+    ):
+        return JSONResponse({"error": "artifact_dir must be a subdirectory of the artifacts directory."}, status_code=400)
+    requested_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            context = await browser.new_context(base_url=target_url)
+            page = await context.new_page()
+            try:
+                tools = BrowserTools(page, target_url, str(requested_dir))
+                agent = AutonomousAgent(
+                    LLMPlanner(timeout=timeout),
+                    tools,
+                    max_actions=max_actions,
+                    max_duration=max_duration,
+                )
+                report = await agent.run(goal)
+            finally:
+                await context.close()
+                await browser.close()
+        normalized_steps = []
+        for index, item in enumerate(report.get("history", []), 1):
+            action = item.get("action") or {}
+            result = item.get("result") or {}
+            normalized_steps.append({
+                "step": item.get("step", index),
+                "action": action.get("tool", "unknown"),
+                "status": result.get("status", "pass" if "action" not in item else "unknown"),
+                "evidence": item.get("evidence") or result.get("evidence", ""),
+                "error": result.get("error", ""),
+                "observation_before": result.get("observation_before"),
+                "observation_after": result.get("observation_after"),
+                "verification": item.get("verification") if isinstance(item.get("verification"), dict) else result.get("verification"),
+            })
+        agent_status = "passed" if report.get("status") == "achieved" else "failed"
+        normalized_report = {
+            "status": agent_status,
+            "steps": normalized_steps,
+            "summary": {
+                "total_steps": len(normalized_steps),
+                "passed": sum(s["status"] == "pass" for s in normalized_steps),
+                "failed": sum(s["status"] == "fail" for s in normalized_steps),
+                "errors": sum(s["status"] == "error" for s in normalized_steps),
+                "timeouts": sum(s["status"] == "timeout" for s in normalized_steps),
+            },
+        }
+        run_id = persist_execution_report(
+            goal=goal,
+            target_url=target_url,
+            report=normalized_report,
+            browser_config={"headless": True, "timeout_seconds": timeout},
+            planner_config={"type": "LLMPlanner", "max_actions": max_actions, "max_duration": max_duration},
+            algorithm_config={"name": "autonomous-agent"},
+            artifact_dir=requested_dir,
+            user_id=payload.get("user_id"),
+        )
+        return JSONResponse({**report, "run_id": run_id})
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"Autonomous browser execution could not start: {exc}"},
+            status_code=502,
+        )
+
+
+@app.get("/api/m4/benchmark", include_in_schema=False)
+async def milestone4_benchmark():
+    """Expose the reproducible synthetic BFS/A*/GA benchmark."""
+    return JSONResponse(benchmark(seed=1729))
+
+
+@app.get("/api/m4/failures/analysis", include_in_schema=False)
+async def milestone4_failure_analysis():
+    """Analyze only failure records persisted in the Milestone 5 database."""
+    base_dir = Path(__file__).resolve().parent
+    database = base_dir / "data" / "browserpilot.db"
+    records = load_persisted_failures(database)
+    clustering = kmeans_cluster(records, k=min(3, len(records) or 1), seed=1729)
+    return JSONResponse({
+        "database": str(database),
+        "persisted_record_count": len(records),
+        "clustering": {
+            "seed": clustering["seed"],
+            "k": clustering["k"],
+            "clusters": clustering["clusters"],
+            "assignments": clustering["assignments"],
+        },
+        "classification": "No supervised evaluation: no persisted labeled failure records.",
     })
 
 
@@ -119,6 +373,32 @@ async def landing(request: Request):
 async def app_shell(request: Request):
     """Application shell page."""
     return templates.TemplateResponse(request=request, name="app_shell.html", context={"title": "BrowserPilot - App", "version": "1.0.0"})
+
+
+@app.get("/app/run", include_in_schema=False)
+async def live_run(request: Request, goal: str = ""):
+    return templates.TemplateResponse(request=request, name="live_run.html", context={"title": "Live Run", "goal_preset": goal})
+
+
+@app.get("/app/runs", include_in_schema=False)
+async def runs_page(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="overview.html",
+        context={
+            "title": "Run History",
+            "total_runs": 0,
+            "pass_rate": 0,
+            "bugs_found": 0,
+            "avg_duration": "0 s",
+            "recent_runs": [],
+        },
+    )
+
+
+@app.post("/api/run", include_in_schema=False)
+async def run_alias(request: Request):
+    return await run_test(request)
 
 
 @app.get("/about", include_in_schema=False)
@@ -219,13 +499,8 @@ async def profile_alias(request: Request):
 async def startup_event():
     """Initialize on startup."""
     # Ensure data directory exists
-    Path("data").mkdir(parents=True, exist_ok=True)
-
-    # Initialize database if needed
-    db_path = Path("data/browserpilot.db")
-    if not db_path.exists():
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        db_path.write_text("{}")
+    db_path = BASE_DIR / "data" / "browserpilot.db"
+    REPORT_REPOSITORY.__init__(db_path)
 
     print(f"\nStarting BrowserPilot...")
     print("=" * 50)
