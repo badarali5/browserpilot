@@ -23,13 +23,105 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 # Import planner generation/validation and the real Playwright executor
-from planner import generate_plan_with_error, validate_plan
-from browser_engine import execute_plan as execute_browser_plan, validate_target_url
-from agent import BrowserTools
-from agent_loop import AutonomousAgent
-from llm_planner import LLMPlanner
+from planner.planner import generate_plan_with_error, validate_plan
+from browser.browser_engine import execute_plan as execute_browser_plan, validate_target_url
+from browser.actions import BrowserTools
+from browser.session import AutonomousAgent
+from planner.llm_planner import LLMPlanner
 from benchmarks.benchmark_m4 import benchmark
 from algorithms.failure_ml import kmeans_cluster, load_persisted_failures
+
+from database.repository import ReportRepository
+from reporting.evidence import EvidenceCollector
+from config import BASE_DIR as CONFIG_BASE_DIR, DATABASE_PATH
+
+BASE_DIR = CONFIG_BASE_DIR
+REPORT_REPOSITORY = ReportRepository(DATABASE_PATH)
+
+
+def persist_execution_report(
+    *,
+    goal: str,
+    target_url: str,
+    report: dict,
+    plan: dict | None = None,
+    browser_config: dict | None = None,
+    planner_config: dict | None = None,
+    algorithm_config: dict | None = None,
+    artifact_dir: str | Path = "artifacts",
+    user_id: str | None = None,
+) -> str:
+    """Persist a real executor report and its evidence without changing its public shape."""
+    from datetime import datetime, timezone
+
+    summary = report.get("summary") or {}
+    started = datetime.now(timezone.utc)
+    status = "running"
+    if summary:
+        status = "passed" if summary.get("failed", 0) == 0 and summary.get("errors", 0) == 0 and summary.get("timeouts", 0) == 0 else "failed"
+    else:
+        status = str(report.get("status", "unknown"))
+
+    run_id = REPORT_REPOSITORY.create_run(
+        goal=goal,
+        target_url=target_url,
+        status=status,
+        user_id=user_id,
+        browser_config=browser_config or {"headless": True},
+        planner_config=planner_config or {"source": "existing planner"},
+        algorithm_config=algorithm_config or {"name": "browser execution"},
+    )
+    collector = EvidenceCollector(REPORT_REPOSITORY, run_id, artifact_dir)
+
+    plan_steps = (plan or {}).get("steps", []) if plan else []
+    for index, step_result in enumerate(report.get("steps", []), 1):
+        arguments = plan_steps[index - 1] if index - 1 < len(plan_steps) else {}
+        step_number = REPORT_REPOSITORY.store_step(
+            run_id,
+            step_result,
+            step_number=step_result.get("step", index),
+            action_arguments=arguments,
+        )
+        if step_result.get("status") in {"fail", "timeout", "error"}:
+            REPORT_REPOSITORY.store_defect(
+                run_id,
+                step_number=step_number,
+                classification=REPORT_REPOSITORY.get_run(run_id).steps[index - 1].error_classification,
+                observed_evidence=step_result.get("evidence") or step_result.get("error") or "",
+                inferred_cause="",
+                confidence="uncertain",
+            )
+
+    screenshots = report.get("screenshots", [])
+    collector.collect_screenshots(screenshots)
+    trace_path = report.get("trace_path")
+    if trace_path:
+        collector.collect_artifact(trace_path, "trace", mime_type="application/zip")
+    evidence_payload = {
+        "console_errors": report.get("console_errors", []),
+        "failed_network_requests": report.get("failed_network_requests", []),
+        "http_responses": report.get("http_responses", []),
+        "current_url": report.get("current_url"),
+    }
+    import json as _json
+    evidence_path = Path(artifact_dir) / f"evidence_{run_id}.json"
+    evidence_path.write_text(_json.dumps(evidence_payload, indent=2), encoding="utf-8")
+    collector.collect_artifact(evidence_path, "browser_evidence", mime_type="application/json")
+    evidence_errors = list(dict.fromkeys([*report.get("evidence_errors", []), *collector.errors]))
+    REPORT_REPOSITORY.update_run(
+        run_id,
+        status=status,
+        summary=summary or report,
+        evidence_errors=evidence_errors,
+    )
+    return run_id
+
+
+from api.reports import add_report_routes
+from api.history import add_history_routes
+
+add_report_routes(app, REPORT_REPOSITORY)
+add_history_routes(app, REPORT_REPOSITORY, templates)
 
 # ══════════════════════════════════════
 # API Routes
@@ -99,14 +191,36 @@ async def run_test(request: Request):
             screenshot_dir=str(requested_dir),
         )
     except Exception as exc:
+        try:
+            failed_run_id = persist_execution_report(
+                goal=goal,
+                target_url=target_url,
+                report={"status": "failed", "steps": [], "summary": {"errors": 1}, "evidence_errors": [str(exc)]},
+                plan=plan,
+                browser_config={"headless": True, "timeout_seconds": timeout},
+                artifact_dir=requested_dir,
+                user_id=payload.get("user_id"),
+            )
+        except Exception:
+            failed_run_id = None
         return JSONResponse(
-            {"error": f"Browser execution could not start: {exc}", "plan": plan},
+            {"error": f"Browser execution could not start: {exc}", "plan": plan, "run_id": failed_run_id},
             status_code=502,
         )
 
+    run_id = persist_execution_report(
+        goal=goal,
+        target_url=target_url,
+        report=report,
+        plan=plan,
+        browser_config={"headless": True, "timeout_seconds": timeout},
+        artifact_dir=requested_dir,
+        user_id=payload.get("user_id"),
+    )
     return JSONResponse({
         "plan": plan,
         "report": report,
+        "run_id": run_id,
     })
 
 
@@ -175,7 +289,43 @@ async def run_agent_test(request: Request):
             finally:
                 await context.close()
                 await browser.close()
-        return JSONResponse(report)
+        normalized_steps = []
+        for index, item in enumerate(report.get("history", []), 1):
+            action = item.get("action") or {}
+            result = item.get("result") or {}
+            normalized_steps.append({
+                "step": item.get("step", index),
+                "action": action.get("tool", "unknown"),
+                "status": result.get("status", "pass" if "action" not in item else "unknown"),
+                "evidence": item.get("evidence") or result.get("evidence", ""),
+                "error": result.get("error", ""),
+                "observation_before": result.get("observation_before"),
+                "observation_after": result.get("observation_after"),
+                "verification": item.get("verification") if isinstance(item.get("verification"), dict) else result.get("verification"),
+            })
+        agent_status = "passed" if report.get("status") == "achieved" else "failed"
+        normalized_report = {
+            "status": agent_status,
+            "steps": normalized_steps,
+            "summary": {
+                "total_steps": len(normalized_steps),
+                "passed": sum(s["status"] == "pass" for s in normalized_steps),
+                "failed": sum(s["status"] == "fail" for s in normalized_steps),
+                "errors": sum(s["status"] == "error" for s in normalized_steps),
+                "timeouts": sum(s["status"] == "timeout" for s in normalized_steps),
+            },
+        }
+        run_id = persist_execution_report(
+            goal=goal,
+            target_url=target_url,
+            report=normalized_report,
+            browser_config={"headless": True, "timeout_seconds": timeout},
+            planner_config={"type": "LLMPlanner", "max_actions": max_actions, "max_duration": max_duration},
+            algorithm_config={"name": "autonomous-agent"},
+            artifact_dir=requested_dir,
+            user_id=payload.get("user_id"),
+        )
+        return JSONResponse({**report, "run_id": run_id})
     except Exception as exc:
         return JSONResponse(
             {"error": f"Autonomous browser execution could not start: {exc}"},
@@ -216,46 +366,57 @@ async def milestone4_failure_analysis():
 @app.get("/", include_in_schema=False)
 async def landing(request: Request):
     """Landing page with professional design."""
-    return templates.TemplateResponse(
-        "landing.html",
-        {"request": request, "title": "BrowserPilot", "version": "1.0.0"},
-    )
+    return templates.TemplateResponse(request=request, name="landing.html", context={"title": "BrowserPilot", "version": "1.0.0"})
 
 
 @app.get("/app", include_in_schema=False)
 async def app_shell(request: Request):
     """Application shell page."""
+    return templates.TemplateResponse(request=request, name="app_shell.html", context={"title": "BrowserPilot - App", "version": "1.0.0"})
+
+
+@app.get("/app/run", include_in_schema=False)
+async def live_run(request: Request, goal: str = ""):
+    return templates.TemplateResponse(request=request, name="live_run.html", context={"title": "Live Run", "goal_preset": goal})
+
+
+@app.get("/app/runs", include_in_schema=False)
+async def runs_page(request: Request):
     return templates.TemplateResponse(
-        "app_shell.html",
-        {"request": request, "title": "BrowserPilot - App", "version": "1.0.0"},
+        request=request,
+        name="overview.html",
+        context={
+            "title": "Run History",
+            "total_runs": 0,
+            "pass_rate": 0,
+            "bugs_found": 0,
+            "avg_duration": "0 s",
+            "recent_runs": [],
+        },
     )
+
+
+@app.post("/api/run", include_in_schema=False)
+async def run_alias(request: Request):
+    return await run_test(request)
 
 
 @app.get("/about", include_in_schema=False)
 async def about(request: Request):
     """About page."""
-    return templates.TemplateResponse(
-        "about.html",
-        {"request": request, "title": "About BrowserPilot", "version": "1.0.0"},
-    )
+    return templates.TemplateResponse(request=request, name="about.html", context={"title": "About BrowserPilot", "version": "1.0.0"})
 
 
 @app.get("/features", include_in_schema=False)
 async def features(request: Request):
     """Features page."""
-    return templates.TemplateResponse(
-        "features.html",
-        {"request": request, "title": "Features", "version": "1.0.0"},
-    )
+    return templates.TemplateResponse(request=request, name="features.html", context={"title": "Features", "version": "1.0.0"})
 
 
 @app.get("/contact", include_in_schema=False)
 async def contact(request: Request):
     """Contact page."""
-    return templates.TemplateResponse(
-        "contact.html",
-        {"request": request, "title": "Contact", "version": "1.0.0"},
-    )
+    return templates.TemplateResponse(request=request, name="contact.html", context={"title": "Contact", "version": "1.0.0"})
 
 
 # ══════════════════════════════════════
@@ -265,105 +426,69 @@ async def contact(request: Request):
 @app.get("/demo", include_in_schema=False)
 async def demo_root(request: Request):
     """Demo website root."""
-    return templates.TemplateResponse(
-        "demo_index.html",
-        {"request": request, "title": "BrowserPilot Demo"},
-    )
+    return templates.TemplateResponse(request=request, name="demo_index.html", context={"title": "BrowserPilot Demo"})
 
 
 @app.get("/demo/register", include_in_schema=False)
 async def demo_register_get(request: Request):
     """Registration page."""
-    return templates.TemplateResponse(
-        "demo_register.html",
-        {"request": request, "title": "Register", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
 
 
 @app.post("/demo/register", include_in_schema=False)
 async def demo_register_post(request: Request):
     """Handle registration."""
-    return templates.TemplateResponse(
-        "demo_register.html",
-        {"request": request, "title": "Register", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
 
 
 @app.get("/demo/login", include_in_schema=False)
 async def demo_login_get(request: Request):
     """Login page."""
-    return templates.TemplateResponse(
-        "demo_login.html",
-        {"request": request, "title": "Login", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
 
 
 @app.post("/demo/login", include_in_schema=False)
 async def demo_login_post(request: Request):
     """Handle login."""
-    return templates.TemplateResponse(
-        "demo_login.html",
-        {"request": request, "title": "Login", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
 
 
 @app.get("/demo/profile", include_in_schema=False)
 async def demo_profile_get(request: Request):
     """Profile page."""
-    return templates.TemplateResponse(
-        "demo_profile.html",
-        {"request": request, "title": "Profile", "user": {}},
-    )
+    return templates.TemplateResponse(request=request, name="demo_profile.html", context={"title": "Profile", "user": {}})
 
 
 @app.get("/demo/logout", include_in_schema=False)
 async def demo_logout(request: Request):
     """Logout."""
-    return templates.TemplateResponse(
-        "demo_index.html",
-        {"request": request, "title": "BrowserPilot Demo"},
-    )
+    return templates.TemplateResponse(request=request, name="demo_index.html", context={"title": "BrowserPilot Demo"})
 
 
 # Short demo aliases keep the existing demo usable at the natural test URLs.
 @app.get("/register", include_in_schema=False)
 async def register_alias(request: Request):
-    return templates.TemplateResponse(
-        "demo_register.html",
-        {"request": request, "title": "Register", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
 
 
 @app.post("/register", include_in_schema=False)
 async def register_alias_post(request: Request):
-    return templates.TemplateResponse(
-        "demo_register.html",
-        {"request": request, "title": "Register", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
 
 
 @app.get("/login", include_in_schema=False)
 async def login_alias(request: Request):
-    return templates.TemplateResponse(
-        "demo_login.html",
-        {"request": request, "title": "Login", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
 
 
 @app.post("/login", include_in_schema=False)
 async def login_alias_post(request: Request):
-    return templates.TemplateResponse(
-        "demo_login.html",
-        {"request": request, "title": "Login", "error": None},
-    )
+    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
 
 
 @app.get("/profile", include_in_schema=False)
 async def profile_alias(request: Request):
-    return templates.TemplateResponse(
-        "demo_profile.html",
-        {"request": request, "title": "Profile", "user": {}},
-    )
+    return templates.TemplateResponse(request=request, name="demo_profile.html", context={"title": "Profile", "user": {}})
 
 
 # ══════════════════════════════════════
@@ -374,13 +499,8 @@ async def profile_alias(request: Request):
 async def startup_event():
     """Initialize on startup."""
     # Ensure data directory exists
-    Path("data").mkdir(parents=True, exist_ok=True)
-
-    # Initialize database if needed
-    db_path = Path("data/browserpilot.db")
-    if not db_path.exists():
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        db_path.write_text("{}")
+    db_path = BASE_DIR / "data" / "browserpilot.db"
+    REPORT_REPOSITORY.__init__(db_path)
 
     print(f"\nStarting BrowserPilot...")
     print("=" * 50)
