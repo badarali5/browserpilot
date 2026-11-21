@@ -1,7 +1,7 @@
 
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -21,6 +21,18 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 templates = Jinja2Templates(directory="templates")
+
+templates.env.filters["datetimeformat"] = lambda value: (
+    value.strftime("%Y-%m-%d %H:%M") if hasattr(value, "strftime")
+    else str(value).replace("T", " ")[:16]
+)
+
+# Small in-memory account store for the built-in demo application.
+users_db: dict[str, dict] = {}
+
+
+def is_valid_email(email: str) -> bool:
+    return "@" in email and "." in email.rsplit("@", 1)[-1]
 
 # Import planner generation/validation and the real Playwright executor
 from planner.planner import generate_plan_with_error, validate_plan
@@ -214,6 +226,11 @@ async def run_test(request: Request):
         report=report,
         plan=plan,
         browser_config={"headless": True, "timeout_seconds": timeout},
+        planner_config={"source": "existing planner", "algorithm": str(payload.get("algorithm") or "A*")},
+        algorithm_config={
+            "name": str(payload.get("algorithm") or "A*"),
+            "bug_injection": str(payload.get("bug") or "") or None,
+        },
         artifact_dir=requested_dir,
         user_id=payload.get("user_id"),
     )
@@ -382,23 +399,60 @@ async def live_run(request: Request, goal: str = ""):
 
 @app.get("/app/runs", include_in_schema=False)
 async def runs_page(request: Request):
+    runs = REPORT_REPOSITORY.list_runs(request.headers.get("x-user-id"), limit=100)
+    passed = sum(run.status in {"passed", "completed", "achieved"} for run in runs)
+    bugs = sum(len(run.defects) for run in runs)
+    avg = sum(run.duration_seconds for run in runs) / len(runs) if runs else 0.0
+    recent = [
+        {
+            "goal": run.goal,
+            "algorithm": run.algorithm_config.get("name", "Browser execution"),
+            "bug_injection": run.algorithm_config.get("bug_injection"),
+            "status": run.status,
+            "created_at": run.started_at,
+        }
+        for run in runs[:20]
+    ]
     return templates.TemplateResponse(
         request=request,
         name="overview.html",
         context={
             "title": "Run History",
-            "total_runs": 0,
-            "pass_rate": 0,
-            "bugs_found": 0,
-            "avg_duration": "0 s",
-            "recent_runs": [],
+            "total_runs": len(runs),
+            "pass_rate": round(passed / len(runs) * 100, 1) if runs else 0.0,
+            "bugs_found": bugs,
+            "avg_duration": f"{avg:.2f} s",
+            "recent_runs": recent,
         },
     )
 
 
 @app.post("/api/run", include_in_schema=False)
 async def run_alias(request: Request):
-    return await run_test(request)
+    response = await run_test(request)
+    if request.headers.get("hx-request") != "true":
+        return response
+    try:
+        import json
+        import html
+        payload = json.loads(response.body)
+        if response.status_code >= 400:
+            message = html.escape(str(payload.get("error") or "The run could not start."))
+            return HTMLResponse(
+                f'<div class="p-4 text-danger" role="alert">{message}</div>',
+                status_code=response.status_code,
+            )
+        report = payload.get("report") or {}
+        summary = report.get("summary") or {}
+        return HTMLResponse(
+            f'<div class="p-4">'
+            f'<strong class="text-success">{summary.get("passed", 0)}/{summary.get("total_steps", 0)} steps passed</strong>'
+            f'<p class="mt-2 text-sm text-fg-secondary">Run ID: {payload.get("run_id") or "none"}</p>'
+            f'</div>',
+            status_code=response.status_code,
+        )
+    except Exception:
+        return response
 
 
 @app.get("/about", include_in_schema=False)
@@ -436,9 +490,36 @@ async def demo_register_get(request: Request):
 
 
 @app.post("/demo/register", include_in_schema=False)
-async def demo_register_post(request: Request):
+async def demo_register_post(
+    request: Request,
+    username: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+):
     """Handle registration."""
-    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
+    error = None
+    if not username.strip():
+        error = "Username is required"
+    elif not is_valid_email(email):
+        error = "Please enter a valid email"
+    elif len(password) < 6:
+        error = "Password must be at least 6 characters"
+    elif username in users_db:
+        error = "Username already taken"
+
+    if error:
+        return templates.TemplateResponse(
+            request=request,
+            name="demo_register.html",
+            context={"title": "Register", "error": error},
+        )
+
+    users_db[username] = {
+        "email": email,
+        "password": password,
+        "profile": {"display_name": username, "bio": ""},
+    }
+    return RedirectResponse(url="/demo/login", status_code=302)
 
 
 @app.get("/demo/login", include_in_schema=False)
@@ -448,21 +529,42 @@ async def demo_login_get(request: Request):
 
 
 @app.post("/demo/login", include_in_schema=False)
-async def demo_login_post(request: Request):
+async def demo_login_post(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+):
     """Handle login."""
-    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
+    user = users_db.get(username)
+    if not user or user["password"] != password:
+        return templates.TemplateResponse(
+            request=request,
+            name="demo_login.html",
+            context={"title": "Login", "error": "Invalid username or password"},
+        )
+    response = RedirectResponse(url="/demo/profile", status_code=302)
+    response.set_cookie("demo_user", username, httponly=True, samesite="lax")
+    return response
 
 
 @app.get("/demo/profile", include_in_schema=False)
 async def demo_profile_get(request: Request):
     """Profile page."""
-    return templates.TemplateResponse(request=request, name="demo_profile.html", context={"title": "Profile", "user": {}})
+    username = request.cookies.get("demo_user", "")
+    user = users_db.get(username)
+    return templates.TemplateResponse(
+        request=request,
+        name="demo_profile.html",
+        context={"title": "Profile", "user": user["profile"] if user else {}},
+    )
 
 
 @app.get("/demo/logout", include_in_schema=False)
 async def demo_logout(request: Request):
     """Logout."""
-    return templates.TemplateResponse(request=request, name="demo_index.html", context={"title": "BrowserPilot Demo"})
+    response = RedirectResponse(url="/demo", status_code=302)
+    response.delete_cookie("demo_user")
+    return response
 
 
 # Short demo aliases keep the existing demo usable at the natural test URLs.
@@ -472,8 +574,13 @@ async def register_alias(request: Request):
 
 
 @app.post("/register", include_in_schema=False)
-async def register_alias_post(request: Request):
-    return templates.TemplateResponse(request=request, name="demo_register.html", context={"title": "Register", "error": None})
+async def register_alias_post(
+    request: Request,
+    username: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+):
+    return await demo_register_post(request, username, email, password)
 
 
 @app.get("/login", include_in_schema=False)
@@ -482,13 +589,56 @@ async def login_alias(request: Request):
 
 
 @app.post("/login", include_in_schema=False)
-async def login_alias_post(request: Request):
-    return templates.TemplateResponse(request=request, name="demo_login.html", context={"title": "Login", "error": None})
+async def login_alias_post(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    return await demo_login_post(request, username, password)
 
 
 @app.get("/profile", include_in_schema=False)
 async def profile_alias(request: Request):
-    return templates.TemplateResponse(request=request, name="demo_profile.html", context={"title": "Profile", "user": {}})
+    username = request.cookies.get("demo_user", "")
+    user = users_db.get(username)
+    return templates.TemplateResponse(
+        request=request,
+        name="demo_profile.html",
+        context={"title": "Profile", "user": user["profile"] if user else {}},
+    )
+
+
+@app.post("/profile", include_in_schema=False)
+async def profile_alias_post(
+    request: Request,
+    display_name: str = Form(...),
+    bio: str = Form(...),
+):
+    username = request.cookies.get("demo_user", "")
+    user = users_db.get(username)
+    if user:
+        user["profile"] = {"display_name": display_name, "bio": bio}
+    return templates.TemplateResponse(
+        request=request,
+        name="demo_profile.html",
+        context={"title": "Profile", "user": user["profile"] if user else {}},
+    )
+
+
+@app.post("/demo/profile", include_in_schema=False)
+async def demo_profile_post(
+    request: Request,
+    display_name: str = Form(...),
+    bio: str = Form(...),
+):
+    return await profile_alias_post(request, display_name, bio)
+
+
+@app.get("/logout", include_in_schema=False)
+async def logout_alias(request: Request):
+    response = RedirectResponse(url="/demo", status_code=302)
+    response.delete_cookie("demo_user")
+    return response
 
 
 # ══════════════════════════════════════

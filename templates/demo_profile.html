@@ -18,7 +18,7 @@
       </aside>
       <div class="bp-profile-main">
         <h2 style="margin:0 0 18px">Profile details</h2>
-        <form class="bp-form" method="POST" action="/profile">
+        <form class="bp-form" method="POST" action="/demo/profile">
           <div class="bp-field"><label for="display_name">Display name</label><input class="bp-input" id="display_name" name="display_name" value="{{ user.display_name if user else '' }}" required></div>
           <div class="bp-field"><label for="bio">Bio</label><textarea class="bp-textarea" id="bio" name="bio">{{ user.bio if user else '' }}</textarea></div>
           <button class="bp-btn" type="submit">Save changes</button>

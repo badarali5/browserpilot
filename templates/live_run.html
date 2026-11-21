@@ -11,7 +11,7 @@
         
         <!-- Goal input and controls -->
         <div class="bg-bg-secondary/50 p-4 rounded-xl backdrop-blur border border-border-color/20">
-            <form id="goal-form" hx-post="/api/run" hx-target="#current-goal" class="grid grid-cols-1 gap-3">
+            <form id="goal-form" hx-post="/api/run" hx-target="#live-view" hx-swap="innerHTML" class="grid grid-cols-1 gap-3">
                 <div>
                     <label class="block text-sm text-fg-secondary mb-1">Custom Goal (optional)</label>
                     <input type="text" name="goal" id="goal-input" 
@@ -23,7 +23,7 @@
                 <div class="grid grid-cols-2 gap-2">
                     <div>
                         <label class="block text-xs text-fg-secondary uppercase tracking-wider mb-1">Algorithm</label>
-                        <select id="algorithm-select" 
+                        <select id="algorithm-select" name="algorithm"
                                 hx-post="/api/run"
                                 hx-target="#current-goal"
                                 class="w-full rounded-lg border border-border-color/50 bg-bg-tertiary p-2 text-sm focus:border-primary focus:outline-none"
@@ -37,7 +37,7 @@
                     </div>
                     <div>
                         <label class="block text-xs text-fg-secondary uppercase tracking-wider mb-1">Bug Injection</label>
-                        <select id="bug-select" 
+                        <select id="bug-select" name="bug"
                                 class="w-full rounded-lg border border-border-color/50 bg-bg-tertiary p-2 text-sm focus:border-primary focus:outline-none"
                         >
                             <option value="">None</option>
@@ -141,4 +141,59 @@
             Re-run with Bug
         </button>
     </section>
+    <script>
+        (() => {
+            const form = document.getElementById('goal-form');
+            const cancel = document.getElementById('cancel-run');
+            const pause = document.getElementById('pause-resume');
+            const rerun = document.getElementById('re-run');
+            const rerunBug = document.getElementById('re-run-bug');
+            const liveView = document.getElementById('live-view');
+            let activeRequest = null;
+
+            form?.addEventListener('htmx:xhr:beforeSend', (event) => {
+                activeRequest = event.detail.xhr;
+                cancel.disabled = false;
+            });
+            form?.addEventListener('htmx:afterRequest', (event) => {
+                activeRequest = null;
+                cancel.disabled = true;
+                if (event.detail.successful) {
+                    pause.disabled = false;
+                    rerun.disabled = false;
+                    rerunBug.disabled = false;
+                }
+            });
+            form?.addEventListener('htmx:beforeSwap', (event) => {
+                try {
+                    const data = JSON.parse(event.detail.xhr.responseText);
+                    const summary = data.report?.summary;
+                    liveView.innerHTML = summary
+                        ? `<div class="p-4"><strong class="text-success">${summary.passed}/${summary.total_steps} steps passed</strong><p class="mt-2 text-sm text-fg-secondary">Run ID: ${data.run_id || 'none'}</p></div>`
+                        : `<div class="p-4 text-danger">${data.error || 'The run could not start.'}</div>`;
+                    event.detail.shouldSwap = false;
+                } catch (_) {}
+            });
+
+            cancel?.addEventListener('click', () => {
+                activeRequest?.abort();
+                activeRequest = null;
+                cancel.disabled = true;
+            });
+            pause?.addEventListener('click', () => {
+                const paused = pause.dataset.paused === 'true';
+                pause.dataset.paused = paused ? 'false' : 'true';
+                pause.textContent = paused ? 'Pause' : 'Resume';
+            });
+            rerun?.addEventListener('click', () => {
+                document.getElementById('bug-select').value = '';
+                form.requestSubmit();
+            });
+            rerunBug?.addEventListener('click', () => {
+                const bugSelect = document.getElementById('bug-select');
+                if (!bugSelect.value) bugSelect.value = 'BUG_1';
+                form.requestSubmit();
+            });
+        })();
+    </script>
 {% endblock %}
