@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from ui_state_graph import GoalPredicate, UIStateGraph
+from .ui_state_graph import GoalPredicate, UIStateGraph
 
 
 def _goal(goal: str | GoalPredicate | Mapping[str, Any]):

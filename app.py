@@ -28,8 +28,8 @@ from browser_engine import execute_plan as execute_browser_plan, validate_target
 from agent import BrowserTools
 from agent_loop import AutonomousAgent
 from llm_planner import LLMPlanner
-from benchmark_m4 import benchmark
-from failure_ml import kmeans_cluster, load_persisted_failures
+from benchmarks.benchmark_m4 import benchmark
+from algorithms.failure_ml import kmeans_cluster, load_persisted_failures
 
 # ══════════════════════════════════════
 # API Routes

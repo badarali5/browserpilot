@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 from agent import BrowserTools
 from llm_planner import LLMPlanner
-from testing_strategy import TestingStrategy
+from algorithms.testing_strategy import TestingStrategy
 
 
 class AutonomousAgent:

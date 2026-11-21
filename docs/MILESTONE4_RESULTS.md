@@ -17,7 +17,7 @@
 
 The first run measured a GA initial best fitness of `18` and final best fitness of `20`
 (new unique state discovery; higher is better). Runtime values vary by machine and were
-measured once on the local run; re-run `py benchmark_m4.py` for current values.
+measured once on the local run; re-run `py benchmarks/benchmark_m4.py` for current values.
 
 ## Persisted failure data
 

@@ -1,9 +1,9 @@
 import random
 
-from csp_solver import CSPSolver
-from genetic_algorithm import GeneticAlgorithm
-from search_algorithms import astar, bfs
-from ui_state_graph import UIStateGraph
+from algorithms.csp_solver import CSPSolver
+from algorithms.genetic_algorithm import GeneticAlgorithm
+from algorithms.search_algorithms import astar, bfs
+from algorithms.ui_state_graph import UIStateGraph
 
 
 def make_search_graph():

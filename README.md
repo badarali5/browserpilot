@@ -74,18 +74,18 @@ BrowserPilot now provides modular implementations for:
 - **Genetic Algorithm**: seeded test-sequence evolution with measurable fitness.
 - **Failure ML**: train/test supervised classification and k-means clustering over persisted records.
 
-The implementations live in `ui_state_graph.py`, `search_algorithms.py`, `csp_solver.py`,
-`genetic_algorithm.py`, `failure_ml.py`, and `testing_strategy.py`. Algorithm actions use the
+The implementations live in `algorithms/`, including `ui_state_graph.py`, `search_algorithms.py`,
+`csp_solver.py`, `genetic_algorithm.py`, `failure_ml.py`, and `testing_strategy.py`. Algorithm actions use the
 existing `BrowserTools`/Playwright layer; they cannot bypass URL allowlists or the verifier.
 
 Run the reproducible synthetic benchmark:
 
 ```powershell
-py benchmark_m4.py
+py benchmarks/benchmark_m4.py
 ```
 
 Run Milestone 4 tests:
 
 ```powershell
-py -m pytest tests/test_m4_algorithms.py tests/test_m4_ml.py -q
+py -m pytest tests/m4/test_m4_algorithms.py tests/m4/test_m4_ml.py -q
 ```

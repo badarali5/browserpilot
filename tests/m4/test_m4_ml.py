@@ -1,4 +1,4 @@
-from failure_ml import (
+from algorithms.failure_ml import (
     FailureClassifier,
     kmeans_cluster,
     train_test_split,

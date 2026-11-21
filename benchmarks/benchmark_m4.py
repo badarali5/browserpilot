@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import random
+import sys
+from pathlib import Path
 
-from genetic_algorithm import GeneticAlgorithm
-from search_algorithms import astar, bfs
-from ui_state_graph import UIStateGraph
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from algorithms.genetic_algorithm import GeneticAlgorithm
+from algorithms.search_algorithms import astar, bfs
+from algorithms.ui_state_graph import UIStateGraph
 
 
 def make_grid(seed: int = 1729) -> UIStateGraph:
