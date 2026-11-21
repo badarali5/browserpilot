@@ -64,3 +64,28 @@ curl -Method POST http://127.0.0.1:8000/api/run-agent-test `
   -ContentType "application/json" `
   -Body '{"goal":"Navigate to /login and verify that Log In is present","target_url":"http://127.0.0.1:8000","max_actions":12}'
 ```
+## Milestone 4: Algorithmic testing strategies
+
+BrowserPilot now provides modular implementations for:
+
+- **BFS**: minimum-transition UI navigation.
+- **A\***: weighted navigation with an optional admissible heuristic.
+- **CSP plus backtracking/forward checking**: valid and deliberately invalid form payloads.
+- **Genetic Algorithm**: seeded test-sequence evolution with measurable fitness.
+- **Failure ML**: train/test supervised classification and k-means clustering over persisted records.
+
+The implementations live in `ui_state_graph.py`, `search_algorithms.py`, `csp_solver.py`,
+`genetic_algorithm.py`, `failure_ml.py`, and `testing_strategy.py`. Algorithm actions use the
+existing `BrowserTools`/Playwright layer; they cannot bypass URL allowlists or the verifier.
+
+Run the reproducible synthetic benchmark:
+
+```powershell
+py benchmark_m4.py
+```
+
+Run Milestone 4 tests:
+
+```powershell
+py -m pytest tests/test_m4_algorithms.py tests/test_m4_ml.py -q
+```

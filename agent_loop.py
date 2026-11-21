@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 from agent import BrowserTools
 from llm_planner import LLMPlanner
+from testing_strategy import TestingStrategy
 
 
 class AutonomousAgent:
@@ -18,12 +19,14 @@ class AutonomousAgent:
         max_actions: int = 12,
         max_duration: float = 120.0,
         max_retries: int = 2,
+        strategy: Optional[TestingStrategy] = None,
     ) -> None:
         self.planner = planner
         self.tools = tools
         self.max_actions = max_actions
         self.max_duration = max_duration
         self.max_retries = max_retries
+        self.strategy = strategy
 
     async def run(self, goal: str) -> Dict[str, Any]:
         started = time.monotonic()
@@ -44,7 +47,13 @@ class AutonomousAgent:
 
             observation = await self.tools.observe_page()
             try:
-                action = await self.planner.plan_action(objective_text, observation, history)
+                if self.strategy is not None:
+                    action = await self.strategy.generate_next_action(
+                        observation,
+                        {"objective": objective_text},
+                    )
+                else:
+                    action = await self.planner.plan_action(objective_text, observation, history)
             except Exception as exc:
                 retries += 1
                 history.append({"step": action_number, "planning_error": exc.__class__.__name__})
