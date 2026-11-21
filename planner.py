@@ -48,8 +48,8 @@ VALID_ACTIONS = {
         "description": "Navigate to a specific URL",
     },
     "assert": {
-        "required": ["expected"],
-        "optional": ["selector", "timeout"],
+        "required": [],
+        "optional": ["selector", "timeout", "condition", "expected", "attribute"],
         "description": "Verify element text or page state",
     },
     "screenshot": {
@@ -146,8 +146,12 @@ def validate_step(step: Dict[str, Any]) -> tuple[bool, str]:
             return False, "Action 'navigate' requires a non-empty 'url'"
 
     if action == "assert":
+        condition = step.get("condition")
         expected = step.get("expected")
-        if not isinstance(expected, str) or not expected.strip():
+        if condition:
+            if not isinstance(condition, str) or not condition.strip():
+                return False, "Action 'assert' requires a valid 'condition'"
+        elif not isinstance(expected, str) or not expected.strip():
             return False, "Action 'assert' requires non-empty 'expected'"
 
     if "timeout" in step:
@@ -202,8 +206,9 @@ def validate_plan(plan: Dict[str, Any]) -> tuple[bool, str, List[str]]:
             return False, f"Step {i+1}: 'click' action requires 'selector'"
         if action == "navigate" and "url" not in step:
             return False, f"Step {i+1}: 'navigate' action requires 'url'"
-        if action == "assert" and "expected" not in step:
-            return False, f"Step {i+1}: 'assert' action requires 'expected'"
+        if action == "assert":
+            if "condition" not in step and "expected" not in step:
+                return False, f"Step {i+1}: 'assert' action requires 'expected' or 'condition'"
 
     # Detect known bug patterns in the plan
     plan_text = json.dumps(plan).lower()

@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from observer import capture_page_snapshot
+from verifier import verify
 
 
 # ══════════════════════════════════════
@@ -143,6 +145,13 @@ async def execute_step(
     expected = step.get("expected")
 
     result: ExecutionResult = make_result(step_num=0, action=action, status="error")
+    observation_before = None
+    if action in {"navigate", "input", "click", "assert"}:
+        try:
+            observation_before = await capture_page_snapshot(page)
+            result["observation_before"] = observation_before
+        except Exception:
+            result["observation_before"] = None
 
     try:
         if action == "navigate":
@@ -169,11 +178,15 @@ async def execute_step(
             if element:
                 await element.fill(value)
                 await element.press("Tab")  # Move focus
+                if selector and "password" in selector.lower():
+                    evidence_value = "[redacted]"
+                else:
+                    evidence_value = str(value)
                 result = make_result(
                     step_num=step.get("step", 1),
                     action="input",
                     status="pass",
-                    evidence=f"Entered '{value}' into {selector}",
+                    evidence=f"Entered '{evidence_value}' into {selector}",
                 )
             else:
                 return make_result(
@@ -230,54 +243,16 @@ async def execute_step(
                     evidence="Assert step missing expected value",
                     error="Missing expected value",
                 )
-
-            # Get actual page content for verification
-            try:
-                body_text = await page.inner_text("body")
-                title = await page.title()
-                found = expected.lower() in body_text.lower() or expected.lower() in title.lower()
-            except Exception:
-                found = False
-
-            if found:
-                result = make_result(
-                    step_num=step.get("step", 1),
-                    action="assert",
-                    status="pass",
-                    evidence=f"Verified '{expected}' found on page body",
-                )
-            else:
-                # Try checking specific selector
-                if selector:
-                    try:
-                        elem_text = await page.text_content(selector)
-                        found = expected.lower() in (elem_text or "").lower()
-                    except Exception:
-                        found = False
-
-                    if found:
-                        result = make_result(
-                            step_num=step.get("step", 1),
-                            action="assert",
-                            status="pass",
-                            evidence=f"Verified '{expected}' via selector: {selector}",
-                        )
-                    else:
-                        result = make_result(
-                            step_num=step.get("step", 1),
-                            action="assert",
-                            status="fail",
-                            evidence=f"Could not verify '{expected}' on page",
-                            error=f"Expected text '{expected}' not found on page",
-                        )
-                else:
-                    result = make_result(
-                        step_num=step.get("step", 1),
-                        action="assert",
-                        status="fail",
-                        evidence=f"Could not verify '{expected}' on page",
-                        error=f"Expected text '{expected}' not found on page",
-                    )
+            verification_step = {**step, "condition": step.get("condition") or "text_present"}
+            verification = await verify(page, verification_step, timeout=timeout)
+            result = make_result(
+                step_num=step.get("step", 1),
+                action="assert",
+                status=verification["status"],
+                evidence=verification["details"] or f"Condition '{verification['condition']}' checked",
+                error=verification["error"],
+            )
+            result["verification"] = verification
         elif action == "screenshot":
             filepath = step.get("filepath") or value or f"screenshot_step_{step.get('step', 1)}.png"
             screenshot_root = step.get("_artifact_dir")
@@ -316,6 +291,17 @@ async def execute_step(
             evidence="",
             error=str(e),
         )
+
+    if observation_before is not None:
+        result["observation_before"] = observation_before
+    if action in {"navigate", "input", "click", "assert", "screenshot"}:
+        try:
+            result["observation_after"] = await capture_page_snapshot(page)
+        except Exception as exc:
+            result["observation_after"] = None
+            if result["status"] == "pass":
+                result["status"] = "error"
+                result["error"] = f"Could not capture post-action observation: {exc}"
 
     return result
 
